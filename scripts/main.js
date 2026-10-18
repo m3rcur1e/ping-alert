@@ -15,6 +15,91 @@ function head(x, y, angle, size){
         x + Angles.trnsx(angle - 140, size), y + Angles.trnsy(angle - 140, size));
 }
 
+const HUD_LOOKUP_MS = 500;
+let hudEls = [], hudLookAt = -HUD_LOOKUP_MS;
+const hudRects = [];
+
+function collectHud(group, depth, out){
+    const sw = Core.scene.getWidth(), sh = Core.scene.getHeight();
+    group.getChildren().each(e => {
+        const full = e.getWidth() >= sw - 1 && e.getHeight() >= sh - 1;
+        if(e instanceof Group && (full || e instanceof Stack)){
+            if(depth < 4) collectHud(e, depth + 1, out);
+        }else{
+            out.push(e);
+        }
+    });
+}
+
+function shown(e){
+    for(let p = e; p != null; p = p.parent){
+        if(!p.visible || p.color.a < 0.05) return false;
+    }
+    return true;
+}
+
+function pushRect(e){
+    if(e == null || !shown(e) || e.getWidth() <= 0 || e.getHeight() <= 0) return;
+    const v = e.localToStageCoordinates(Tmp.v1.set(0, 0));
+    hudRects.push(v.x, v.y, e.getWidth(), e.getHeight());
+}
+
+function updateHudRects(){
+    if(Time.timeSinceMillis(hudLookAt) > HUD_LOOKUP_MS){
+        hudLookAt = Time.millis();
+        hudEls = [];
+        collectHud(Vars.ui.hudGroup, 0, hudEls);
+    }
+    hudRects.length = 0;
+    for(let i = 0; i < hudEls.length; i++) pushRect(hudEls[i]);
+    pushRect(rateCalc());
+    if(cardsRoot != null && cardsRoot.parent != null) pushRect(cardsRoot);
+}
+
+function rayToHud(cx, cy, dx, dy, m, max){
+    let best = max;
+    for(let i = 0; i < hudRects.length; i += 4){
+        let x1 = hudRects[i] - m, y1 = hudRects[i + 1] - m, x2 = hudRects[i] + hudRects[i + 2] + m, y2 = hudRects[i + 1] + hudRects[i + 3] + m;
+        let tin = -1e9, tout = 1e9;
+        if(dx != 0){
+            let a = (x1 - cx) / dx, b = (x2 - cx) / dx;
+            tin = a < b ? a : b; tout = a < b ? b : a;
+        }else if(cx < x1 || cx > x2) continue;
+        if(dy != 0){
+            let a = (y1 - cy) / dy, b = (y2 - cy) / dy;
+            let lo = a < b ? a : b, hi = a < b ? b : a;
+            if(lo > tin) tin = lo;
+            if(hi < tout) tout = hi;
+        }else if(cy < y1 || cy > y2) continue;
+        if(tin < tout && tin > 0 && tin < best) best = tin;
+    }
+    return best;
+}
+
+function labelOffHud(lab, hw, hh, pad, w, h){
+    for(let iter = 0; iter < 3; iter++){
+        let moved = false;
+        for(let i = 0; i < hudRects.length; i += 4){
+            let x1 = hudRects[i] - pad, y1 = hudRects[i + 1] - pad, x2 = hudRects[i] + hudRects[i + 2] + pad, y2 = hudRects[i + 1] + hudRects[i + 3] + pad;
+            if(lab[0] + hw <= x1 || lab[0] - hw >= x2 || lab[1] + hh <= y1 || lab[1] - hh >= y2) continue;
+            let moves = [x1 - hw - lab[0], 0, x2 + hw - lab[0], 0, 0, y1 - hh - lab[1], 0, y2 + hh - lab[1]];
+            let bx = 0, by = 0, bd = 1e9;
+            for(let k = 0; k < 8; k += 2){
+                let nx = lab[0] + moves[k], ny = lab[1] + moves[k + 1];
+                if(nx - hw < 0 || nx + hw > w || ny - hh < 0 || ny + hh > h) continue;
+                let d = Math.abs(moves[k]) + Math.abs(moves[k + 1]);
+                if(d < bd){ bd = d; bx = moves[k]; by = moves[k + 1]; }
+            }
+            if(bd < 1e9){
+                lab[0] += bx;
+                lab[1] += by;
+                moved = true;
+            }
+        }
+        if(!moved) break;
+    }
+}
+
 function showArrow(source, wx, wy){
     const id = prop(source, "id");
     if(arrows[id]) arrows[id].remove();
@@ -24,6 +109,7 @@ function showArrow(source, wx, wy){
     const start = Time.millis();
     const pos = new Vec2();
     const layout = new GlyphLayout();
+    const lab = [0, 0];
     let dist = -1, label = "";
 
     const el = extend(Element, {
@@ -40,17 +126,13 @@ function showArrow(source, wx, wy){
             const cx = w / 2, cy = h / 2;
             const dx = pos.x - cx, dy = pos.y - cy;
             const margin = Scl.scl(EDGE);
-            const k = Math.min((cx - margin) / Math.max(Math.abs(dx), 0.001), (cy - margin) / Math.max(Math.abs(dy), 0.001));
+            const size = Scl.scl(14);
+            const outer = size * 1.35;
+            updateHudRects();
+            const k = rayToHud(cx, cy, dx, dy, outer + Scl.scl(6),
+                Math.min((cx - margin) / Math.max(Math.abs(dx), 0.001), (cy - margin) / Math.max(Math.abs(dy), 0.001)));
             const ax = cx + dx * k, ay = cy + dy * k;
             const angle = Angles.angle(cx, cy, pos.x, pos.y);
-            const size = Scl.scl(14);
-
-            Draw.color(Color.black);
-            Draw.alpha(alpha * 0.6);
-            head(ax, ay, angle, size * 1.35);
-            Draw.color(color);
-            Draw.alpha(alpha);
-            head(ax, ay, angle, size);
 
             const font = Fonts.outline;
             const d = Math.round(Mathf.dst(Vars.player.x, Vars.player.y, wx, wy) / Vars.tilesize);
@@ -60,9 +142,24 @@ function showArrow(source, wx, wy){
                 layout.setText(font, label);
             }
 
-            const pad = Scl.scl(6), half = layout.width / 2, capH = font.getCapHeight();
-            const tx = Mathf.clamp(ax - Angles.trnsx(angle, size * 2.4), pad + half, w - pad - half);
-            const ty = Mathf.clamp(ay - Angles.trnsy(angle, size * 2.4), pad + capH / 2, h - pad - capH / 2);
+            const pad = Scl.scl(6), lp = Scl.scl(3), capH = font.getCapHeight();
+            const hw = layout.width / 2 + lp, hh = capH / 2 + lp + Scl.scl(2);
+            const len = Math.max(Mathf.len(dx, dy), 0.001), ux = dx / len, uy = dy / len;
+            const gap = outer + Scl.scl(3);
+            const s = Math.min((hw + gap) / Math.max(Math.abs(ux), 0.001), (hh + gap) / Math.max(Math.abs(uy), 0.001));
+            lab[0] = ax - ux * s;
+            lab[1] = ay - uy * s;
+            labelOffHud(lab, hw, hh, Scl.scl(4), w, h);
+            const tx = Mathf.clamp(lab[0], pad + hw, w - pad - hw);
+            const ty = Mathf.clamp(lab[1], pad + hh, h - pad - hh);
+
+            Draw.color(Color.black);
+            Draw.alpha(alpha * 0.6);
+            head(ax, ay, angle, outer);
+            Draw.color(color);
+            Draw.alpha(alpha);
+            head(ax, ay, angle, size);
+
             font.setColor(color.r, color.g, color.b, alpha);
             font.draw(label, tx, ty + capH / 2, Align.center);
             font.setColor(Color.white);
